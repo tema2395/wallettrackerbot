@@ -235,9 +235,6 @@ wallet-tracker-bot/
 
 MIT License
 
-## 👨‍💻 Автор
-
-Создано с помощью Claude AI в Antigravity
 
 ## 🤝 Вклад
 
