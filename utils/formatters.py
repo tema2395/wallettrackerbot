@@ -46,7 +46,12 @@ def format_transaction(tx: Dict, blockchain: str) -> str:
     # Статус (если есть)
     status = ""
     if 'status' in tx:
-        status = "✅" if tx['status'] == 'success' else "❌"
+        if tx['status'] == 'success':
+            status = "✅"
+        elif tx['status'] == 'failed':
+            status = "❌"
+        else:
+            status = "⚠️"
     
     # Хеш транзакции
     tx_hash = tx.get('hash', 'N/A')
@@ -94,13 +99,3 @@ def format_wallet_info(address: str, blockchain: str, balance_data: Dict, transa
     message += f'🔗 <a href="{explorer_link}">Смотреть в Explorer</a>'
     
     return message
-
-def detect_blockchain(address: str) -> str:
-    """Автоматическое определение типа блокчейна по адресу"""
-    if len(address) == 48 and (address.startswith('EQ') or address.startswith('UQ')):
-        return 'TON'
-    elif len(address) == 42 and address.startswith('0x'):
-        # По умолчанию считаем ETH, но может быть и BSC
-        return 'ETH'
-    else:
-        return 'UNKNOWN'

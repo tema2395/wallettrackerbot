@@ -7,9 +7,13 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, C
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from blockchain import TONWalletTracker, ETHWalletTracker, BSCWalletTracker
+from services.trackers import ton_tracker, eth_tracker, bsc_tracker
+from services.notifications import (
+    add_tracked_wallet,
+    list_tracked_wallets,
+    remove_tracked_wallet,
+)
 from utils import format_wallet_info, detect_blockchain
-from config import config
 
 router = Router()
 
@@ -17,11 +21,7 @@ router = Router()
 class WalletStates(StatesGroup):
     waiting_for_address = State()
     waiting_for_blockchain_choice = State()
-
-# Инициализация трекеров
-ton_tracker = TONWalletTracker()
-eth_tracker = ETHWalletTracker(config.etherscan_api_key)
-bsc_tracker = BSCWalletTracker(config.bscscan_api_key)
+    waiting_for_untrack_address = State()
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
@@ -34,6 +34,8 @@ async def cmd_start(message: Message):
         "🟡 Binance Smart Chain (BSC)\n\n"
         "<b>Команды:</b>\n"
         "/track - Отследить кошелек\n"
+        "/list - Список отслеживаемых кошельков\n"
+        "/untrack - Удалить кошелек из отслеживания\n"
         "/help - Помощь\n\n"
         "Просто отправь мне адрес кошелька, и я покажу всю информацию!"
     )
@@ -52,7 +54,10 @@ async def cmd_help(message: Message):
         "1. Используй команду /track\n"
         "2. Отправь адрес кошелька\n"
         "3. Выбери блокчейн (если нужно)\n"
-        "4. Получи информацию!\n\n"
+        "4. Получи информацию и уведомления о новых транзакциях\n\n"
+        "<b>Дополнительные команды:</b>\n"
+        "/list - Список отслеживаемых кошельков\n"
+        "/untrack - Удалить кошелек из отслеживания\n\n"
         "<b>Примеры адресов:</b>\n"
         "TON: <code>EQD...xyz</code>\n"
         "ETH: <code>0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb</code>\n"
@@ -65,10 +70,47 @@ async def cmd_help(message: Message):
 async def cmd_track(message: Message, state: FSMContext):
     """Обработчик команды /track"""
     await message.answer(
-        "📝 Отправь мне адрес кошелька, который хочешь отследить:",
+        "📝 Отправь мне адрес кошелька, который хочешь отследить. "
+        "Я включу уведомления о новых транзакциях.",
         parse_mode="HTML"
     )
     await state.set_state(WalletStates.waiting_for_address)
+
+
+@router.message(Command("list"))
+async def cmd_list(message: Message):
+    """Список отслеживаемых кошельков"""
+    wallets = list_tracked_wallets(message.chat.id)
+    if not wallets:
+        await message.answer("Список отслеживаемых кошельков пуст.", parse_mode="HTML")
+        return
+
+    lines = ["<b>Отслеживаемые кошельки:</b>"]
+    for wallet in wallets:
+        short_address = f"{wallet.address[:8]}...{wallet.address[-6:]}"
+        lines.append(f"• {wallet.blockchain}: <code>{short_address}</code>")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("untrack"))
+async def cmd_untrack(message: Message, state: FSMContext):
+    """Удаление кошелька из отслеживания"""
+    parts = message.text.split(maxsplit=1)
+    if len(parts) == 2:
+        address = parts[1].strip()
+        removed = await remove_tracked_wallet(message.chat.id, address)
+        if removed:
+            await message.answer("Кошелек удален из отслеживания.", parse_mode="HTML")
+        else:
+            await message.answer("Кошелек не найден в списке отслеживания.", parse_mode="HTML")
+        return
+
+    await message.answer(
+        "Отправь адрес кошелька, который нужно удалить из отслеживания:",
+        parse_mode="HTML",
+    )
+    await state.set_state(WalletStates.waiting_for_untrack_address)
 
 @router.message(WalletStates.waiting_for_address)
 async def process_wallet_address(message: Message, state: FSMContext):
@@ -110,6 +152,18 @@ async def process_wallet_address(message: Message, state: FSMContext):
     await state.clear()
     await process_ton_wallet(message, address)
 
+
+@router.message(WalletStates.waiting_for_untrack_address)
+async def process_untrack_address(message: Message, state: FSMContext):
+    """Обработка адреса для удаления из отслеживания"""
+    address = message.text.strip()
+    removed = await remove_tracked_wallet(message.chat.id, address)
+    if removed:
+        await message.answer("Кошелек удален из отслеживания.", parse_mode="HTML")
+    else:
+        await message.answer("Кошелек не найден в списке отслеживания.", parse_mode="HTML")
+    await state.clear()
+
 @router.callback_query(F.data.startswith("track_"))
 async def process_blockchain_choice(callback: CallbackQuery):
     """Обработка выбора блокчейна"""
@@ -145,6 +199,7 @@ async def process_ton_wallet(message: Message, address: str):
     )
     
     await status_msg.edit_text(wallet_info, parse_mode="HTML", disable_web_page_preview=True)
+    await _register_wallet(message, address, "TON")
 
 async def process_eth_wallet(message: Message, address: str):
     """Обработка Ethereum кошелька"""
@@ -163,6 +218,7 @@ async def process_eth_wallet(message: Message, address: str):
     )
     
     await message.answer(wallet_info, parse_mode="HTML", disable_web_page_preview=True)
+    await _register_wallet(message, address, "ETH")
 
 async def process_bsc_wallet(message: Message, address: str):
     """Обработка BSC кошелька"""
@@ -181,30 +237,43 @@ async def process_bsc_wallet(message: Message, address: str):
     )
     
     await message.answer(wallet_info, parse_mode="HTML", disable_web_page_preview=True)
+    await _register_wallet(message, address, "BNB")
+
+
+async def _register_wallet(message: Message, address: str, blockchain: str) -> None:
+    added = await add_tracked_wallet(message.chat.id, address, blockchain)
+    if added:
+        await message.answer(
+            "Кошелек добавлен в отслеживание. Уведомления о новых транзакциях включены.",
+            parse_mode="HTML",
+        )
 
 # Обработка адресов, отправленных напрямую (без команды /track)
 @router.message(F.text)
 async def handle_direct_address(message: Message):
     """Обработка адресов, отправленных напрямую"""
     address = message.text.strip()
+
+    if address.startswith("/"):
+        return
     
-    # Проверяем, похоже ли это на адрес кошелька
-    if len(address) in [42, 48] and (address.startswith('0x') or address.startswith('EQ') or address.startswith('UQ')):
-        blockchain = detect_blockchain(address)
-        
-        if blockchain == 'TON':
-            await process_ton_wallet(message, address)
-        elif blockchain == 'ETH':
-            # Предлагаем выбрать сеть
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="⟠ Ethereum", callback_data=f"track_eth_{address}"),
-                    InlineKeyboardButton(text="🟡 BSC", callback_data=f"track_bsc_{address}")
-                ]
-            ])
-            await message.answer(
-                "🤔 Этот адрес может быть как Ethereum, так и BSC.\n"
-                "Выбери сеть:",
-                reply_markup=keyboard,
-                parse_mode="HTML"
-            )
+    blockchain = detect_blockchain(address)
+    if blockchain == 'UNKNOWN':
+        return
+
+    if blockchain == 'TON':
+        await process_ton_wallet(message, address)
+    elif blockchain == 'ETH':
+        # Предлагаем выбрать сеть
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⟠ Ethereum", callback_data=f"track_eth_{address}"),
+                InlineKeyboardButton(text="🟡 BSC", callback_data=f"track_bsc_{address}")
+            ]
+        ])
+        await message.answer(
+            "🤔 Этот адрес может быть как Ethereum, так и BSC.\n"
+            "Выбери сеть:",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
